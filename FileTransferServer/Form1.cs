@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics.Eventing.Reader;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -23,18 +24,33 @@ namespace FileTransferServer
             InitializeComponent();
         }
 
-        private void buttonListen_Click(object sender, EventArgs e)
+        private async void buttonListen_Click(object sender, EventArgs e)
         {
             try
             {
                 int port = int.Parse(textPort.Text);
-                Task.Factory.StartNew(() => HandleIncomingFile(port));
-                MessageBox.Show("Listening on port" + port);
+                if (!File.GetAttributes(textFolder.Text).HasFlag(FileAttributes.Directory))
+                {
+                    throw new DirectoryNotFoundException();
+                }
+                if (port > 65535)
+                {
+                    throw new ArgumentOutOfRangeException();
+                }
+
+                MessageBox.Show("Listening on port " + port);
+
+                await Task.Factory.StartNew(() => HandleIncomingFile(port));
+                MessageBox.Show("done" + port);
+
             }
-            catch (Exception exception)
+            catch (ArgumentOutOfRangeException)
             {
-                Console.WriteLine(exception);
-                throw;
+                MessageBox.Show("Invalid port!");
+            }
+            catch (DirectoryNotFoundException)
+            {
+                MessageBox.Show("Directory not found!");
             }
 
         }
@@ -61,36 +77,64 @@ namespace FileTransferServer
                 tcpListener.Start();
                 while (true)
                 {
-                    Socket handlerSocket = tcpListener.AcceptSocket();
-                    if (handlerSocket.Connected)
+                    using (Socket handlerSocket = tcpListener.AcceptSocket())
                     {
-                        NetworkStream networkStream = new NetworkStream(handlerSocket);
-                        int blockSize = 1024;
-                        Byte[] dataByte = new Byte[blockSize];
-
-                        int readByteLength = networkStream.Read(dataByte, 0, blockSize);
-                        int fileNameLength = BitConverter.ToInt32(dataByte, 0);
-                        string fileName = Encoding.ASCII.GetString(dataByte, 4, fileNameLength);
-                        Stream fileStream = File.OpenWrite(textFolder.Text + fileName);
-                        fileStream.Write(dataByte, 4 + fileNameLength, (1024 - (4 + fileNameLength)));
-
-                        while (true)
+                        if (handlerSocket.Connected)
                         {
-                            readByteLength = networkStream.Read(dataByte, 0, blockSize);
-                            fileStream.Write(dataByte, 0, readByteLength);
-                            if (readByteLength == 0)
-                                break;
+                            //Prepare for reading file
+                            var networkStream = new NetworkStream(handlerSocket);
+                            var blockSize = 1024;
+                            var dataByte = new byte[blockSize];
+
+                            //Get the name of the file you got and want to save
+                            networkStream.Read(dataByte, 0, blockSize);
+                            int fileNameLength = BitConverter.ToInt32(dataByte, 0);
+                            string fileName = Encoding.ASCII.GetString(dataByte, 4, fileNameLength);
+
+                            //Check if the file exists, if so, append a number at the end of the filename to get rid of collisions
+                            string filePath = Path.Combine(textFolder.Text, fileName);
+                            string safeName = fileName;
+                            var count = 1;
+
+                            while (File.Exists(Path.Combine(textFolder.Text, safeName)))
+                                safeName =
+                                    $"{Path.GetFileNameWithoutExtension(filePath)}{count++}{Path.GetExtension(filePath)}";
+                            try
+                            {
+                                //Create file with the now safe and unused filename and write the first kilobyte of read data to it
+                                using (Stream fileStream = File.OpenWrite(Path.Combine(textFolder.Text, safeName)))
+                                {
+                                    fileStream.Write(dataByte, 4 + fileNameLength, 1024 - (4 + fileNameLength));
+
+                                    //Read and save the rest of the file
+                                    while (true)
+                                    {
+                                        int readByteLength = networkStream.Read(dataByte, 0, blockSize);
+                                        fileStream.Write(dataByte, 0, readByteLength);
+                                        if (readByteLength == 0)
+                                            break;
+                                    }
+                                }
+                            }
+                            catch (IOException)
+                            {
+                                MessageBox.Show("File operation failed!");
+                                if (File.Exists(Path.Combine(textFolder.Text, safeName)))
+                                {
+                                    File.Delete(Path.Combine(textFolder.Text, safeName));
+                                }
+                            }
+
+                            //Make sure the delegate is filled and show the completed dialog
+                            NewFileRecieved?.Invoke(this, fileName);
                         }
-                        fileStream.Close();
-                    
-                        NewFileRecieved?.Invoke(this, fileName);
-                        handlerSocket = null;
-                    }
+                    } 
                 }
             }
-            catch (Exception e)
+            catch (IOException )
             {
-                MessageBox.Show(e.Message);
+                MessageBox.Show("Writing file failed!");
+
             }
         }
 

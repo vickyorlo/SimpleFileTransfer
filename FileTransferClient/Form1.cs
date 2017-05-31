@@ -11,6 +11,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.NetworkInformation;
 using System.IO;
+using System.Linq.Expressions;
 
 
 namespace FileTransferClient
@@ -25,60 +26,71 @@ namespace FileTransferClient
             InitializeComponent();
         }
 
+        private void labelChanger(string status)
+        {
+            labelStatus.Text = status;
+        }
+
         private void buttonBrowse_Click(object sender, EventArgs e)
         {
-            OpenFileDialog dlg = new OpenFileDialog();
-            dlg.Title = "File Sharing Client";
+            var dlg = new OpenFileDialog {Title = "File Sharing Client"};
             dlg.ShowDialog();
             testFilePath.Text = dlg.FileName;
             fileName = dlg.FileName;
             shortFileName = dlg.SafeFileName;
         }
 
-        private void buttonSend_Click(object sender, EventArgs e)
+        private async void buttonSend_Click(object sender, EventArgs e)
         {
             try
             {
-                string ipAddress = textIPAddress.Text;
+                labelStatus.Text = "Sending...";
+                IPAddress ipAddress = IPAddress.Parse(textIPAddress.Text);
                 int port = int.Parse(textPort.Text);
+                IPEndPoint ipEndPoint = new IPEndPoint(ipAddress, port);
+                if (port > 65535) throw new FormatException();
                 string fileName = testFilePath.Text;
-                Task.Factory.StartNew(() => SendFile(ipAddress, port, fileName, shortFileName));
-                //MessageBox.Show("Sending...");
+
+
+                var progress = new Progress<string>(s => labelStatus.Text = s);
+                var task = Task.Factory.StartNew(() => SendFile(ipEndPoint, fileName, shortFileName, progress));
+                await task;
+                labelStatus.Text = "Sent!";
             }
-            catch (Exception exception)
+            catch (AggregateException ae)
+            {
+                labelStatus.Text = "Waiting...";
+                throw ae.Flatten();
+            }
+            catch (FormatException)
             {
                 MessageBox.Show("Invalid IP/Port!");
-                Console.WriteLine(exception);
-                //throw;
+            }
+            catch (ArgumentException)
+            {
+                MessageBox.Show("No file selected!");
+            }
+            catch (SocketException)
+            {
+                MessageBox.Show("Invalid IP Address or host unreachable!");
             }
         }
 
-        public void SendFile(string remoteHostIP, int remoteHostPort,
-            string longFileName, string shortFileName)
+        public void SendFile(IPEndPoint hostIP,
+            string longFileName, string shortFileName,IProgress<string> progress)
         {
-            try
-            {
-                if (!string.IsNullOrEmpty(remoteHostIP))
+                byte[] fileNameByte = Encoding.ASCII.GetBytes(shortFileName);
+                byte[] fileData = File.ReadAllBytes(longFileName);
+                byte[] clientData = new byte[4 + fileNameByte.Length + fileData.Length];
+                byte[] fileNameLen = BitConverter.GetBytes(fileNameByte.Length);
+                fileNameLen.CopyTo(clientData, 0);
+                fileNameByte.CopyTo(clientData, 4);
+                fileData.CopyTo(clientData, 4 + fileNameByte.Length);
+                using (TcpClient clientSocket = new TcpClient(hostIP))
                 {
-                    byte[] fileNameByte = Encoding.ASCII.GetBytes(shortFileName);
-                    byte[] fileData = File.ReadAllBytes(longFileName);
-                    byte[] clientData = new byte[4 + fileNameByte.Length + fileData.Length];
-                    byte[] fileNameLen = BitConverter.GetBytes(fileNameByte.Length);
-                    fileNameLen.CopyTo(clientData, 0);
-                    fileNameByte.CopyTo(clientData, 4);
-                    fileData.CopyTo(clientData, 4 + fileNameByte.Length);
-                    using (TcpClient clientSocket = new TcpClient(remoteHostIP, remoteHostPort))
-                    {
-                        NetworkStream networkStream = clientSocket.GetStream();
-                        networkStream.Write(clientData, 0, clientData.GetLength(0));
-                    }
-
+                    NetworkStream networkStream = clientSocket.GetStream();
+                    networkStream.Write(clientData, 0, clientData.GetLength(0));
                 }
-            }
-            catch
-            {
-                MessageBox.Show("Cannot connect to server!");
-            }
         }
     }
 }
